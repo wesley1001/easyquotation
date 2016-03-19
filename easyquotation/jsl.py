@@ -18,10 +18,16 @@ class Jsl(object):
     __fundb_url = 'http://www.jisilu.cn/data/sfnew/fundb_list/?___t={ctime:d}'
 
     # 分级套利的接口
-    _fundarb_url = 'http://www.jisilu.cn/data/sfnew/arbitrage_vip_list/?___t={ctime:d}'
+    __fundarb_url = 'http://www.jisilu.cn/data/sfnew/arbitrage_vip_list/?___t={ctime:d}'
 
     # 集思录登录接口
-    __jxl_login_url = 'http://www.jisilu.cn/account/ajax/login_process/'
+    __jsl_login_url = 'https://www.jisilu.cn/account/ajax/login_process/'
+
+    # 集思录 ETF 接口
+    __etf_index_url = "https://www.jisilu.cn/jisiludata/etf.php?___t={ctime:d}"
+    # 黄金 ETF , 货币 ETF 留坑,未完成
+    __etf_gold_url = "https://www.jisilu.cn/jisiludata/etf.php?qtype=pmetf&___t={ctime:d}"
+    __etf_money_url = "https://www.jisilu.cn/data/money_fund/list/?___t={ctime:d}"
 
     # 分级A数据
     # 返回的字典格式
@@ -85,6 +91,25 @@ class Jsl(object):
             fundb_id = cell['fundb_id']
             d[fundb_id] = cell
         return d
+
+    @staticmethod
+    def formatetfindexjson(fundbjson):
+        """格式化集思录返回 指数ETF 的json数据,以字典形式保存"""
+        d = {}
+        for row in fundbjson['rows']:
+            cell = row['cell']
+            fundb_id = cell['fund_id']
+            d[fundb_id] = cell
+        return d
+
+    @staticmethod
+    def percentage2float(per):
+        """
+        将字符串的百分数转化为浮点数
+        :param per:
+        :return:
+        """
+        return float(per.strip('%')) / 100.
 
     def funda(self, fields=[], min_volume=0, min_discount=0, ignore_nodown=False, forever=False):
         """以字典形式返回分级A数据
@@ -154,7 +179,7 @@ class Jsl(object):
         """
         s = requests.session()
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko',
         }
         s.headers.update(headers)
 
@@ -163,21 +188,23 @@ class Jsl(object):
                          password=jsl_password,
                          net_auto_login='1',
                          _post_type='ajax')
-        rep = s.post(self.__jxl_login_url, data=logindata)
 
-        if rep.status_code != 200: return {}
+        rep = s.post(self.__jsl_login_url, data=logindata)
+
+        if rep.json()['err'] is not None:
+            return rep.json()
 
         # 添加当前的ctime
-        self.__fundarb_url = self.__fundarb_url.format(ctime=int(time.time()))
+        fundarb_url = self.__fundarb_url.format(ctime=int(time.time()))
 
         pdata = dict(avolume=avolume,
                      bvolume=bvolume,
                      ptype=ptype,
                      is_search='1',
                      market=['sh', 'sz'],
-                     rp='100')
+                     rp='50')
         # 请求数据
-        rep = s.post(self.__fundarb_url, data=pdata)
+        rep = s.post(fundarb_url, data=pdata)
 
         # 获取返回的json字符串
         fundajson = json.loads(rep.text)
@@ -186,3 +213,62 @@ class Jsl(object):
 
         self.__fundarb = data
         return self.__fundarb
+
+    def etfindex(self, index_id="", min_volume=0, max_discount=None, min_discount=None):
+        """
+        以字典形式返回 指数ETF 数据
+        :param index_id: 获取指定的指数
+        :param min_volume: 最小成交量
+        :param min_discount: 最低溢价率, 适用于溢价套利, 格式 "-1.2%", "-1.2", -0.012 三种均可
+        :param max_discount: 最高溢价率, 适用于折价套利, 格式 "-1.2%", "-1.2", -0.012 三种均可
+        :return: {"fund_id":{}}
+        """
+        # 添加当前的ctime
+        self.__etf_index_url = self.__etf_index_url.format(ctime=int(time.time()))
+        # 请求数据
+        rep = requests.get(self.__etf_index_url)
+        # 获取返回的json字符串, 转化为字典
+        etfJson = rep.json()
+
+        # 格式化返回的json字符串
+        data = self.formatetfindexjson(etfJson)
+
+        # 过滤
+        if index_id:
+            # 指定跟踪的指数代码
+            data = {fund_id: cell for fund_id, cell in data.items() if cell["index_id"] == index_id}
+        if min_volume:
+            # 过滤小于指定交易量的数据
+            data = {fund_id: cell for fund_id, cell in data.items() if float(cell["volume"]) >= min_volume}
+        if min_discount is not None:
+            # 指定最小溢价率
+            if isinstance(min_discount, str):
+                if min_discount.endswith("%"):
+                    # 如果是字符串形式,先转为浮点形式
+                    min_discount = self.percentage2float(min_discount)
+                else:
+                    min_discount = float(min_discount) / 100.
+            data = {fund_id: cell for fund_id, cell in data.items() if
+                    self.percentage2float(cell["discount_rt"]) >= min_discount}
+        if max_discount is not None:
+            # 指定最大溢价率
+            if isinstance(max_discount, str):
+                if max_discount.endswith("%"):
+                    # 如果是字符串形式,先转为浮点形式
+                    max_discount = self.percentage2float(max_discount)
+                else:
+                    max_discount = float(max_discount) / 100.
+            data = {fund_id: cell for fund_id, cell in data.items() if
+                    self.percentage2float(cell["discount_rt"]) <= max_discount}
+
+        self.__etfindex = data
+        return self.__etfindex
+
+
+if __name__ == "__main__":
+    Jsl().etfindex(
+            index_id="000016",
+            min_volume=0,
+            max_discount="-0.4",
+            min_discount="-1.3%"
+    )
